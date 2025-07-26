@@ -2,11 +2,13 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"github.com/bwmarrin/discordgo"
 	"log"
+	"math/rand/v2"
 	"os"
 	"os/signal"
-
-	"github.com/bwmarrin/discordgo"
+	"time"
 )
 
 type DiscordCredentials struct {
@@ -23,6 +25,14 @@ var commands = []*discordgo.ApplicationCommand{
 		Name:        "test",
 		Description: "This is a test command!",
 	},
+	{
+		Name:        "join",
+		Description: "Join your active Voice Channel",
+	},
+	{
+		Name:        "quote",
+		Description: "Random quote!",
+	},
 }
 
 func init() {
@@ -34,7 +44,7 @@ func init() {
 	flag.Parse()
 
 	if *token == "" {
-		log.Fatal("Bot token must not be empty")
+		log.Print("Bot token must not be empty")
 	}
 
 	creds = DiscordCredentials{
@@ -50,22 +60,23 @@ func main() {
 
 	discord, err := discordgo.New("Bot " + creds.BotToken)
 	if err != nil {
-		log.Fatal("Failed to create discord bot connection")
+		log.Print("Failed to create discord bot connection")
 	}
 
 	discord.AddHandler(interactionHandler)
 	discord.AddHandler(func(session *discordgo.Session, ready *discordgo.Ready) {
-		log.Printf("Logged in as %s", ready.User.String())
+		log.Printf("Logged in as %s\n", ready.User.String())
 	})
 
 	_, err = discord.ApplicationCommandBulkOverwrite(creds.AppID, creds.GuildID, commands)
+
 	if err != nil {
-		log.Fatalf("Could not register commands: %s", err)
+		log.Printf("Could not register commands: %s\n", err)
 	}
 
 	err = discord.Open()
 	if err != nil {
-		log.Fatalf("Could not open discord session: %s", err)
+		log.Printf("Could not open discord session: %s\n", err)
 	}
 
 	// Keyboard interrupter
@@ -75,7 +86,7 @@ func main() {
 
 	err = discord.Close()
 	if err != nil {
-		log.Printf("Couldnt gracefully close discord session: %s", err)
+		log.Printf("Couldnt gracefully close discord session: %s\n", err)
 	}
 
 }
@@ -86,11 +97,81 @@ func interactionHandler(session *discordgo.Session, interaction *discordgo.Inter
 	}
 
 	data := interaction.ApplicationCommandData()
-	if data.Name != "test" {
-		return
+	if data.Name == "test" {
+		testHandler(session, interaction)
+	}
+	if data.Name == "join" {
+		joinHandler(session, interaction)
+	}
+	if data.Name == "quote" {
+		quoteHandler(session, interaction)
 	}
 
-	testHandler(session, interaction)
+	return
+
+}
+
+func joinHandler(session *discordgo.Session, interaction *discordgo.InteractionCreate) (err error) {
+
+	// Sending text response
+	returnString := "Attempting to join users Voice Channel..."
+	response := &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: returnString,
+		},
+	}
+	err = session.InteractionRespond(interaction.Interaction, response)
+	if err != nil {
+		log.Printf("Error while responding to interaction: %s\n", err)
+	}
+
+	// Find what VC to join
+	var guildID string
+	var channelID string
+
+	// Find the channel the message came from
+	channel, err := session.State.Channel(interaction.ChannelID)
+	if err != nil {
+		log.Printf("Couldnt find channel for join command: %s\n", err)
+	}
+
+	// Find Guild channel belongs to
+	guild, err := session.State.Guild(channel.GuildID)
+	if err != nil {
+		log.Printf("Couldnt find matching guild for channel: %s\n", err)
+	}
+
+	//	Look at VCs and find user
+	for _, voiceStatus := range guild.VoiceStates {
+		voiceID := voiceStatus.UserID
+		interactionID := interaction.Member.User.ID
+		if voiceID == interactionID {
+			fmt.Printf("Found user %s in channel %s\n", interaction.Member.User.Username, voiceStatus.ChannelID)
+			channelID = voiceStatus.ChannelID
+		}
+	}
+
+	if channelID == "" {
+		log.Println("Couldnt find user who ran join")
+	}
+
+	// Join the voice channel
+	log.Printf("Attempting to join voice channel\n")
+	// guildID = "790405217803305000"
+	// channelID = "885998792640458783"
+	voiceSession, err := session.ChannelVoiceJoin(guildID, channelID, false, true)
+	if err != nil {
+		log.Printf("Error while attempting to join server: %s\n", err)
+	}
+
+	voiceSession.Speaking(true)
+
+	time.Sleep(10 * time.Second)
+	voiceSession.Disconnect()
+
+	return nil
+
 }
 
 func testHandler(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
@@ -105,6 +186,25 @@ func testHandler(session *discordgo.Session, interaction *discordgo.InteractionC
 
 	err := session.InteractionRespond(interaction.Interaction, response)
 	if err != nil {
-		log.Fatalf("Error while responding to interaction: %s", err)
+		log.Printf("Error while responding to interaction: %s", err)
 	}
+}
+
+func quoteHandler(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+	quotes := []string{"test1", "test2", "test3"}
+
+	returnString := quotes[rand.IntN(len(quotes))]
+
+	response := &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: returnString,
+		},
+	}
+
+	err := session.InteractionRespond(interaction.Interaction, response)
+	if err != nil {
+		log.Printf("Error while responding to interaction: %s", err)
+	}
+
 }
