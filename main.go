@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	// "encoding/binary"
 	"github.com/joho/godotenv"
 	"io"
 	"log/slog"
