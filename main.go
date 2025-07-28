@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
+	// "encoding/binary"
 	"github.com/joho/godotenv"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 	"github.com/disgoorg/disgo/voice"
 
 	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/ffmpeg-audio"
 	"github.com/disgoorg/snowflake/v2"
 )
 
@@ -122,10 +124,13 @@ func main() {
 func interactionHandler(event *events.ApplicationCommandInteractionCreate) {
 	data := event.SlashCommandInteractionData()
 	if data.CommandName() == "test" {
+		slog.Info("Got test command")
 		testHandler(event)
 	} else if data.CommandName() == "echo" {
+		slog.Info("Got Info command")
 		echoHandler(event, &data)
 	} else if data.CommandName() == "join" {
+		slog.Info("Got join command")
 		go joinHandler(event.Client(), event)
 	}
 }
@@ -164,6 +169,7 @@ func joinHandler(client bot.Client, event *events.ApplicationCommandInteractionC
 	voiceState, err := client.Rest().GetUserVoiceState(creds.GuildID, userId)
 	if err != nil {
 		slog.Error("Failed to get voice status for user")
+		// Send failed message
 		err := event.CreateMessage(discord.NewMessageCreateBuilder().
 			SetContent("Failed to find user voice channel. Are you in a voice channel?").
 			SetEphemeral(false).
@@ -210,37 +216,68 @@ func joinHandler(client bot.Client, event *events.ApplicationCommandInteractionC
 		panic("error setting speaking flag: " + err.Error())
 	}
 
-	writeOpus(conn.UDP())
+	writeOpus(conn)
 
 }
 
-func writeOpus(w io.Writer) {
-	file, err := os.Open("nico.dca")
-	if err != nil {
-		panic("error opening file: " + err.Error())
-	}
-	ticker := time.NewTicker(time.Millisecond * 20)
-	defer ticker.Stop()
+func writeOpus(connection voice.Conn) {
 
-	var lenBuf [4]byte
-	for range ticker.C {
-		_, err = io.ReadFull(file, lenBuf[:])
+	read, write := io.Pipe()
+
+	go func() {
+		defer write.Close()
+		response, err := http.Get("https://radio.horsemeat.rocks/listen/stankwave_radio/radio.mp3")
 		if err != nil {
-			if err == io.EOF {
-				_ = file.Close()
-				return
-			}
-			panic("error reading file: " + err.Error())
-		}
-
-		// Read the integer
-		frameLen := int64(binary.LittleEndian.Uint32(lenBuf[:]))
-
-		// Copy the frame.
-		_, err = io.CopyN(w, file, frameLen)
-		if err != nil && err != io.EOF {
-			_ = file.Close()
 			return
 		}
+		defer response.Body.Close()
+		io.Copy(write, response.Body)
+	}()
+
+	opusProvider, err := ffmpeg.New(context.Background(), read)
+	if err != nil {
+		slog.Error("Failed to create opus provider", slog.Any("err", err))
 	}
+
+	defer opusProvider.Close()
+
+	connection.SetOpusFrameProvider(opusProvider)
+	err = opusProvider.Wait()
+	if err != nil {
+		slog.Error("Error waiting for opus provider", slog.Any("err", err))
+	}
+
+	return
+
 }
+
+// func writeOpus(w io.Writer) {
+// 	file, err := os.Open("nico.dca")
+// 	if err != nil {
+// 		panic("error opening file: " + err.Error())
+// 	}
+// 	ticker := time.NewTicker(time.Millisecond * 20)
+// 	defer ticker.Stop()
+//
+// 	var lenBuf [4]byte
+// 	for range ticker.C {
+// 		_, err = io.ReadFull(file, lenBuf[:])
+// 		if err != nil {
+// 			if err == io.EOF {
+// 				_ = file.Close()
+// 				return
+// 			}
+// 			panic("error reading file: " + err.Error())
+// 		}
+//
+// 		// Read the integer
+// 		frameLen := int64(binary.LittleEndian.Uint32(lenBuf[:]))
+//
+// 		// Copy the frame.
+// 		_, err = io.CopyN(w, file, frameLen)
+// 		if err != nil && err != io.EOF {
+// 			_ = file.Close()
+// 			return
+// 		}
+// 	}
+// }
