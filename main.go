@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"flag"
+	"github.com/joho/godotenv"
 	"io"
 	"log/slog"
 	"os"
@@ -22,11 +22,8 @@ import (
 )
 
 type DiscordCredentials struct {
-	GuildID        snowflake.ID
-	ChannelID      snowflake.ID
-	BotToken       string
-	AppID          string
-	RemoveCommands bool
+	GuildID  snowflake.ID
+	BotToken string
 }
 
 var creds DiscordCredentials
@@ -67,32 +64,27 @@ var sigch = make(chan os.Signal, 1)
 
 func init() {
 
-	var guild_string = flag.String("guild", "", "GuildID, if not passed bot registers commands globally")
-	var token = flag.String("token", "", "Bot access token")
-	var app = flag.String("app", "", "Application ID")
-	var channel_string = flag.String("channel", "", "Channel ID to connect to")
-	var removeCommands = flag.Bool("rmcmd", true, "Remove all commands after shutdowning or not")
-	flag.Parse()
-
-	guild, err := snowflake.Parse(*guild_string)
+	// Load dotenv
+	err := godotenv.Load()
 	if err != nil {
-		slog.Error("Error parsing guild ID", slog.Any("err", err))
+		slog.Error("Failed to read dotenv", slog.Any("err", err))
 	}
-	channel, err := snowflake.Parse(*channel_string)
+
+	guild_string := os.Getenv("DISCORD_GUILD_ID")
+	token := os.Getenv("DISCORD_TOKEN")
+
+	guild, err := snowflake.Parse(guild_string)
 	if err != nil {
 		slog.Error("Error parsing guild ID", slog.Any("err", err))
 	}
 
-	if *token == "" {
+	if token == "" {
 		slog.Error("Bot token must not be empty")
 	}
 
 	creds = DiscordCredentials{
 		guild,
-		channel,
-		*token,
-		*app,
-		*removeCommands,
+		token,
 	}
 
 }
