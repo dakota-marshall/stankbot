@@ -1,210 +1,246 @@
 package main
 
 import (
-	"flag"
-	"fmt"
-	"github.com/bwmarrin/discordgo"
-	"log"
-	"math/rand/v2"
+	"context"
+	"encoding/binary"
+	"github.com/joho/godotenv"
+	"io"
+	"log/slog"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
+
+	"github.com/disgoorg/disgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/voice"
+
+	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 type DiscordCredentials struct {
-	GuildID        string
-	BotToken       string
-	AppID          string
-	RemoveCommands bool
+	GuildID  snowflake.ID
+	BotToken string
 }
 
 var creds DiscordCredentials
 
-var commands = []*discordgo.ApplicationCommand{
-	{
+var commands = []discord.ApplicationCommandCreate{
+	discord.SlashCommandCreate{
 		Name:        "test",
 		Description: "This is a test command!",
 	},
-	{
+	discord.SlashCommandCreate{
 		Name:        "join",
 		Description: "Join your active Voice Channel",
 	},
-	{
+	discord.SlashCommandCreate{
 		Name:        "quote",
 		Description: "Random quote!",
 	},
+	discord.SlashCommandCreate{
+		Name:        "echo",
+		Description: "says what you say",
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionString{
+				Name:        "message",
+				Description: "What to say",
+				Required:    true,
+			},
+			discord.ApplicationCommandOptionBool{
+				Name:        "ephemeral",
+				Description: "If the response should only be visible to you",
+				Required:    true,
+			},
+		},
+	},
 }
+
+// kill channel
+var sigch = make(chan os.Signal, 1)
 
 func init() {
 
-	var guild = flag.String("guild", "", "GuildID, if not passed bot registers commands globally")
-	var token = flag.String("token", "", "Bot access token")
-	var app = flag.String("app", "", "Application ID")
-	var removeCommands = flag.Bool("rmcmd", true, "Remove all commands after shutdowning or not")
-	flag.Parse()
+	// Load dotenv
+	err := godotenv.Load()
+	if err != nil {
+		slog.Error("Failed to read dotenv", slog.Any("err", err))
+	}
 
-	if *token == "" {
-		log.Print("Bot token must not be empty")
+	guild_string := os.Getenv("DISCORD_GUILD_ID")
+	token := os.Getenv("DISCORD_TOKEN")
+
+	guild, err := snowflake.Parse(guild_string)
+	if err != nil {
+		slog.Error("Error parsing guild ID", slog.Any("err", err))
+	}
+
+	if token == "" {
+		slog.Error("Bot token must not be empty")
 	}
 
 	creds = DiscordCredentials{
-		*guild,
-		*token,
-		*app,
-		*removeCommands,
+		guild,
+		token,
 	}
 
 }
 
 func main() {
 
-	discord, err := discordgo.New("Bot " + creds.BotToken)
+	discord, err := disgo.New(creds.BotToken,
+		bot.WithGatewayConfigOpts(gateway.WithIntents(gateway.IntentGuildVoiceStates)),
+		bot.WithEventListenerFunc(interactionHandler),
+	)
 	if err != nil {
-		log.Print("Failed to create discord bot connection")
-	}
-
-	discord.AddHandler(interactionHandler)
-	discord.AddHandler(func(session *discordgo.Session, ready *discordgo.Ready) {
-		log.Printf("Logged in as %s\n", ready.User.String())
-	})
-
-	_, err = discord.ApplicationCommandBulkOverwrite(creds.AppID, creds.GuildID, commands)
-
-	if err != nil {
-		log.Printf("Could not register commands: %s\n", err)
-	}
-
-	err = discord.Open()
-	if err != nil {
-		log.Printf("Could not open discord session: %s\n", err)
-	}
-
-	// Keyboard interrupter
-	sigch := make(chan os.Signal, 1)
-	signal.Notify(sigch, os.Interrupt)
-	<-sigch
-
-	err = discord.Close()
-	if err != nil {
-		log.Printf("Couldnt gracefully close discord session: %s\n", err)
-	}
-
-}
-
-func interactionHandler(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
-	if interaction.Type != discordgo.InteractionApplicationCommand {
+		slog.Error("Failed to create discord bot connection", slog.Any("err", err))
 		return
 	}
 
-	data := interaction.ApplicationCommandData()
-	if data.Name == "test" {
-		testHandler(session, interaction)
-	}
-	if data.Name == "join" {
-		joinHandler(session, interaction)
-	}
-	if data.Name == "quote" {
-		quoteHandler(session, interaction)
+	defer discord.Close(context.TODO())
+
+	// Set Commands
+	_, err = discord.Rest().SetGuildCommands(discord.ApplicationID(), creds.GuildID, commands)
+
+	err = discord.OpenGateway(context.TODO())
+	if err != nil {
+		slog.Error("Error while connecting to discord gateway", slog.Any("err", err))
+		return
 	}
 
-	return
+	slog.Info("Bot is now running, press CTL+C to exit")
+
+	// Keyboard interrupter
+	signal.Notify(sigch, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
+	<-sigch
 
 }
 
-func joinHandler(session *discordgo.Session, interaction *discordgo.InteractionCreate) (err error) {
-
-	// Sending text response
-	returnString := "Attempting to join users Voice Channel..."
-	response := &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: returnString,
-		},
+func interactionHandler(event *events.ApplicationCommandInteractionCreate) {
+	data := event.SlashCommandInteractionData()
+	if data.CommandName() == "test" {
+		testHandler(event)
+	} else if data.CommandName() == "echo" {
+		echoHandler(event, &data)
+	} else if data.CommandName() == "join" {
+		go joinHandler(event.Client(), event)
 	}
-	err = session.InteractionRespond(interaction.Interaction, response)
-	if err != nil {
-		log.Printf("Error while responding to interaction: %s\n", err)
-	}
-
-	// Find what VC to join
-	var guildID string
-	var channelID string
-
-	// Find the channel the message came from
-	channel, err := session.State.Channel(interaction.ChannelID)
-	if err != nil {
-		log.Printf("Couldnt find channel for join command: %s\n", err)
-	}
-
-	// Find Guild channel belongs to
-	guild, err := session.State.Guild(channel.GuildID)
-	if err != nil {
-		log.Printf("Couldnt find matching guild for channel: %s\n", err)
-	}
-
-	//	Look at VCs and find user
-	for _, voiceStatus := range guild.VoiceStates {
-		voiceID := voiceStatus.UserID
-		interactionID := interaction.Member.User.ID
-		if voiceID == interactionID {
-			fmt.Printf("Found user %s in channel %s\n", interaction.Member.User.Username, voiceStatus.ChannelID)
-			channelID = voiceStatus.ChannelID
-		}
-	}
-
-	if channelID == "" {
-		log.Println("Couldnt find user who ran join")
-	}
-
-	// Join the voice channel
-	log.Printf("Attempting to join voice channel\n")
-	// guildID = "790405217803305000"
-	// channelID = "885998792640458783"
-	voiceSession, err := session.ChannelVoiceJoin(guildID, channelID, false, true)
-	if err != nil {
-		log.Printf("Error while attempting to join server: %s\n", err)
-	}
-
-	voiceSession.Speaking(true)
-
-	time.Sleep(10 * time.Second)
-	voiceSession.Disconnect()
-
-	return nil
-
 }
 
-func testHandler(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+func testHandler(event *events.ApplicationCommandInteractionCreate) {
 	returnString := "Wow lookie here it worked!"
 
-	response := &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: returnString,
-		},
+	err := event.CreateMessage(discord.NewMessageCreateBuilder().
+		SetContent(returnString).
+		SetEphemeral(false).
+		Build(),
+	)
+	if err != nil {
+		slog.Error("Error sending response", slog.Any("err", err))
 	}
 
-	err := session.InteractionRespond(interaction.Interaction, response)
+}
+func echoHandler(event *events.ApplicationCommandInteractionCreate, data *discord.SlashCommandInteractionData) {
+
+	err := event.CreateMessage(discord.NewMessageCreateBuilder().
+		SetContent(data.String("message")).
+		SetEphemeral(data.Bool("ephemeral")).
+		Build(),
+	)
 	if err != nil {
-		log.Printf("Error while responding to interaction: %s", err)
+		slog.Error("Error sending response", slog.Any("err", err))
 	}
+
 }
 
-func quoteHandler(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
-	quotes := []string{"test1", "test2", "test3"}
+func joinHandler(client bot.Client, event *events.ApplicationCommandInteractionCreate) {
 
-	returnString := quotes[rand.IntN(len(quotes))]
-
-	response := &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: returnString,
-		},
-	}
-
-	err := session.InteractionRespond(interaction.Interaction, response)
+	// Find user
+	userId := event.User().ID
+	slog.Info("Finding channel ID for userID: ", slog.Any("snowflake.ID", userId))
+	voiceState, err := client.Rest().GetUserVoiceState(creds.GuildID, userId)
 	if err != nil {
-		log.Printf("Error while responding to interaction: %s", err)
+		slog.Error("Failed to get voice status for user")
+		err := event.CreateMessage(discord.NewMessageCreateBuilder().
+			SetContent("Failed to find user voice channel. Are you in a voice channel?").
+			SetEphemeral(false).
+			Build(),
+		)
+		if err != nil {
+			slog.Error("Error sending response", slog.Any("err", err))
+		}
+		return
+	}
+	slog.Info("Got snowflake channel id for user", slog.Any("snowflake.ID", *voiceState.ChannelID))
+
+	joinMessage := "Attempting to join specified voice channel!"
+
+	// Send connecting message
+	err = event.CreateMessage(discord.NewMessageCreateBuilder().
+		SetContent(joinMessage).
+		SetEphemeral(false).
+		Build(),
+	)
+	if err != nil {
+		slog.Error("Error sending response", slog.Any("err", err))
 	}
 
+	// Connect to voice
+	conn := client.VoiceManager().CreateConn(voiceState.GuildID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	err = conn.Open(ctx, *voiceState.ChannelID, false, false)
+	if err != nil {
+		slog.Error("Error connecting to voice channel", slog.Any("err", err))
+	}
+
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), time.Second*10)
+		defer closeCancel()
+		conn.Close(closeCtx)
+	}()
+
+	err = conn.SetSpeaking(ctx, voice.SpeakingFlagMicrophone)
+	if err != nil {
+		panic("error setting speaking flag: " + err.Error())
+	}
+
+	writeOpus(conn.UDP())
+
+}
+
+func writeOpus(w io.Writer) {
+	file, err := os.Open("nico.dca")
+	if err != nil {
+		panic("error opening file: " + err.Error())
+	}
+	ticker := time.NewTicker(time.Millisecond * 20)
+	defer ticker.Stop()
+
+	var lenBuf [4]byte
+	for range ticker.C {
+		_, err = io.ReadFull(file, lenBuf[:])
+		if err != nil {
+			if err == io.EOF {
+				_ = file.Close()
+				return
+			}
+			panic("error reading file: " + err.Error())
+		}
+
+		// Read the integer
+		frameLen := int64(binary.LittleEndian.Uint32(lenBuf[:]))
+
+		// Copy the frame.
+		_, err = io.CopyN(w, file, frameLen)
+		if err != nil && err != io.EOF {
+			_ = file.Close()
+			return
+		}
+	}
 }
