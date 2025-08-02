@@ -29,8 +29,6 @@ type DiscordCredentials struct {
 
 var creds DiscordCredentials
 
-const radioChannel = "https://radio.horsemeat.rocks/listen/stankwave_radio/radio.mp3"
-
 var commands = []discord.ApplicationCommandCreate{
 	discord.SlashCommandCreate{
 		Name:        "test",
@@ -302,6 +300,7 @@ func joinHandler(client bot.Client, event *events.ApplicationCommandInteractionC
 func writeOpus(connection voice.Conn) {
 
 	read, write := io.Pipe()
+	radioChannel := os.Getenv("RADIO_STREAM_URL")
 
 	go func() {
 		defer write.Close()
