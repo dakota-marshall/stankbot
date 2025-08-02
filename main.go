@@ -250,7 +250,7 @@ func joinHandler(client bot.Client, event *events.ApplicationCommandInteractionC
 	}
 	slog.Info("Got snowflake channel id for user", slog.Any("snowflake.ID", *voiceState.ChannelID))
 
-	const joinMessage = "Attempting to join specified voice channel!"
+	joinMessage := "Attempting to join specified voice channel!\nRequest songs here: " + os.Getenv("RADIO_HOMEPAGE")
 
 	// Send connecting message
 	err = event.CreateMessage(discord.NewMessageCreateBuilder().
