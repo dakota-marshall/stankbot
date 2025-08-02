@@ -29,6 +29,8 @@ type DiscordCredentials struct {
 
 var creds DiscordCredentials
 
+const radioChannel = "https://radio.horsemeat.rocks/listen/stankwave_radio/radio.mp3"
+
 var commands = []discord.ApplicationCommandCreate{
 	discord.SlashCommandCreate{
 		Name:        "test",
@@ -37,6 +39,10 @@ var commands = []discord.ApplicationCommandCreate{
 	discord.SlashCommandCreate{
 		Name:        "join",
 		Description: "Join your active Voice Channel",
+	},
+	discord.SlashCommandCreate{
+		Name:        "leave",
+		Description: "Leave the current voice channel",
 	},
 	discord.SlashCommandCreate{
 		Name:        "quote",
@@ -59,6 +65,14 @@ var commands = []discord.ApplicationCommandCreate{
 		},
 	},
 }
+
+type AudioStream struct {
+	ChannelID  *snowflake.ID
+	Connection *voice.Conn
+}
+
+// Global list of joined channels for leaving
+var audioStreams []AudioStream
 
 // kill channel
 var sigch = make(chan os.Signal, 1)
@@ -131,11 +145,14 @@ func interactionHandler(event *events.ApplicationCommandInteractionCreate) {
 	} else if data.CommandName() == "join" {
 		slog.Info("Got join command")
 		go joinHandler(event.Client(), event)
+	} else if data.CommandName() == "leave" {
+		slog.Info("Got leave command")
+		go leaveHandler(event.Client(), event)
 	}
 }
 
 func testHandler(event *events.ApplicationCommandInteractionCreate) {
-	returnString := "Wow lookie here it worked!"
+	const returnString = "Wow lookie here it worked!"
 
 	err := event.CreateMessage(discord.NewMessageCreateBuilder().
 		SetContent(returnString).
@@ -156,6 +173,60 @@ func echoHandler(event *events.ApplicationCommandInteractionCreate, data *discor
 	)
 	if err != nil {
 		slog.Error("Error sending response", slog.Any("err", err))
+	}
+
+}
+
+func leaveHandler(client bot.Client, event *events.ApplicationCommandInteractionCreate) {
+
+	// Find user
+	userId := event.User().ID
+	slog.Info("Finding channel ID for userID: ", slog.Any("snowflake.ID", userId))
+	voiceState, err := client.Rest().GetUserVoiceState(creds.GuildID, userId)
+	if err != nil {
+		slog.Error("Failed to get voice status for user")
+		// Send failed message
+		err := event.CreateMessage(discord.NewMessageCreateBuilder().
+			SetContent("Failed to find user voice channel. Are you in a voice channel?").
+			SetEphemeral(false).
+			Build(),
+		)
+		if err != nil {
+			slog.Error("Error sending response", slog.Any("err", err))
+		}
+		return
+	}
+	slog.Info("Got snowflake channel id for user", slog.Any("snowflake.ID", *voiceState.ChannelID))
+
+	const leaveMessage = "Leaving voice channel!"
+
+	// Send connecting message
+	err = event.CreateMessage(discord.NewMessageCreateBuilder().
+		SetContent(leaveMessage).
+		SetEphemeral(false).
+		Build(),
+	)
+	if err != nil {
+		slog.Error("Error sending response", slog.Any("err", err))
+	}
+
+	// Leave voice
+	if len(audioStreams) < 1 {
+		slog.Info("No Audio streams in audiostream, skipping leave command")
+		return
+	}
+	for index, stream := range audioStreams {
+		slog.Info("Dropping stream from list: ", slog.Any("AudioStream", stream))
+		if *stream.ChannelID == *voiceState.ChannelID {
+			// Leave channel
+			slog.Info("Found applicable audio stream, leaving", slog.Any("ChannelID", *stream.ChannelID))
+			conn := *stream.Connection
+			conn.Close(context.TODO())
+
+			// Drop from list
+			audioStreams = append(audioStreams[:index], audioStreams[index+1:]...)
+		}
+
 	}
 
 }
@@ -181,7 +252,7 @@ func joinHandler(client bot.Client, event *events.ApplicationCommandInteractionC
 	}
 	slog.Info("Got snowflake channel id for user", slog.Any("snowflake.ID", *voiceState.ChannelID))
 
-	joinMessage := "Attempting to join specified voice channel!"
+	const joinMessage = "Attempting to join specified voice channel!"
 
 	// Send connecting message
 	err = event.CreateMessage(discord.NewMessageCreateBuilder().
@@ -195,6 +266,7 @@ func joinHandler(client bot.Client, event *events.ApplicationCommandInteractionC
 
 	// Connect to voice
 	conn := client.VoiceManager().CreateConn(voiceState.GuildID)
+	audioStreams = append(audioStreams, AudioStream{voiceState.ChannelID, &conn})
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
@@ -208,6 +280,14 @@ func joinHandler(client bot.Client, event *events.ApplicationCommandInteractionC
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), time.Second*10)
 		defer closeCancel()
 		conn.Close(closeCtx)
+
+		for index, stream := range audioStreams {
+			slog.Info("Dropping stream from list: ", slog.Any("AudioStream", stream))
+			if *stream.ChannelID == *voiceState.ChannelID {
+				audioStreams = append(audioStreams[:index], audioStreams[index+1:]...)
+			}
+		}
+
 	}()
 
 	err = conn.SetSpeaking(ctx, voice.SpeakingFlagMicrophone)
@@ -225,7 +305,7 @@ func writeOpus(connection voice.Conn) {
 
 	go func() {
 		defer write.Close()
-		response, err := http.Get("https://radio.horsemeat.rocks/listen/stankwave_radio/radio.mp3")
+		response, err := http.Get(radioChannel)
 		if err != nil {
 			return
 		}
@@ -246,37 +326,4 @@ func writeOpus(connection voice.Conn) {
 		slog.Error("Error waiting for opus provider", slog.Any("err", err))
 	}
 
-	return
-
 }
-
-// func writeOpus(w io.Writer) {
-// 	file, err := os.Open("nico.dca")
-// 	if err != nil {
-// 		panic("error opening file: " + err.Error())
-// 	}
-// 	ticker := time.NewTicker(time.Millisecond * 20)
-// 	defer ticker.Stop()
-//
-// 	var lenBuf [4]byte
-// 	for range ticker.C {
-// 		_, err = io.ReadFull(file, lenBuf[:])
-// 		if err != nil {
-// 			if err == io.EOF {
-// 				_ = file.Close()
-// 				return
-// 			}
-// 			panic("error reading file: " + err.Error())
-// 		}
-//
-// 		// Read the integer
-// 		frameLen := int64(binary.LittleEndian.Uint32(lenBuf[:]))
-//
-// 		// Copy the frame.
-// 		_, err = io.CopyN(w, file, frameLen)
-// 		if err != nil && err != io.EOF {
-// 			_ = file.Close()
-// 			return
-// 		}
-// 	}
-// }

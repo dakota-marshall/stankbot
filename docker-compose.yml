@@ -1,0 +1,7 @@
+version: "3.4"
+services:
+    rss-feed:
+      container_name: stankbot
+      image: stankbot
+      env_file:
+        - .env
