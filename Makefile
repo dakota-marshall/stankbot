@@ -4,3 +4,5 @@ build:
 	docker build . -t stankbot
 run:
 	docker run --rm -it --env-file=.env stankbot
+clean:
+	rm -rf stankbot
