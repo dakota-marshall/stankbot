@@ -80,7 +80,7 @@ func init() {
 	// Load dotenv
 	err := godotenv.Load()
 	if err != nil {
-		slog.Error("Failed to read dotenv", slog.Any("err", err))
+		slog.Warn("Failed to read dotenv", slog.Any("err", err))
 	}
 
 	guild_string := os.Getenv("DISCORD_GUILD_ID")
