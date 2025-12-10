@@ -3,5 +3,6 @@ services:
     rss-feed:
       container_name: stankbot
       image: stankbot
+      restart: unless-stopped
       env_file:
         - .env
